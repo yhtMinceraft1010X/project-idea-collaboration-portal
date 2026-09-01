@@ -175,7 +175,7 @@
   }
   function recordId(r) {
     return pick(r.id, r.problemId, r.initiativeId, r.solutionId, r.findingId,
-      r.assetId, r.smeId, r.userId, r.entityId, r.submissionId);
+      r.assetId, r.smeId, r.userId, r.entityId, r.submissionId, r.questionId, r.answerId);
   }
   function recordTitle(r) {
     return pick(r.title, r.name, (r.content && r.content.title), recordId(r), "Untitled");
@@ -386,6 +386,62 @@
       };
     }
 
+    /* Q&A round-trip (DEV_BYPASS only). */
+    if (path === "/questions") {
+      if (opts && opts.method === "POST") {
+        return { questionId: "demo-q-" + Date.now(), status: "open" };
+      }
+      return {
+        items: [
+          {
+            questionId: "demo-q-1",
+            title: "What's the recommended way to size an S3 Vectors index?",
+            content: "We're indexing about 2M documents and are unsure on the dimension/cost tradeoff.",
+            status: "answered",
+            creatorId: "demo-user",
+            creatorUsername: "demo-user@example.com",
+            createdAt: "2026-01-01T09:00:00.000Z"
+          },
+          {
+            questionId: "demo-q-2",
+            title: "How do teams typically structure Bedrock guardrails?",
+            content: "Looking for a starting point for enterprise compliance policy.",
+            status: "open",
+            creatorId: "demo-user",
+            creatorUsername: "demo-user@example.com",
+            createdAt: "2026-01-02T09:00:00.000Z"
+          }
+        ]
+      };
+    }
+    if (/^\/questions\/[^/]+\/answers$/.test(path) && opts && opts.method === "POST") {
+      return {
+        answerId: "demo-a-" + Date.now(),
+        questionId: path.split("/")[2],
+        content: (opts.body && opts.body.content) || "",
+        creatorUsername: "demo-expert@example.com",
+        createdAt: new Date().toISOString()
+      };
+    }
+    if (/^\/questions\/[^/]+$/.test(path)) {
+      return {
+        questionId: path.split("/")[2],
+        title: "What's the recommended way to size an S3 Vectors index?",
+        content: "We're indexing about 2M documents and are unsure on the dimension/cost tradeoff.",
+        status: "answered",
+        creatorId: "demo-user",
+        creatorUsername: "demo-user@example.com",
+        answers: [
+          {
+            answerId: "demo-a-1",
+            content: "Start with 1024 dimensions and cosine distance; revisit once you have real recall numbers.",
+            creatorUsername: "demo-expert@example.com",
+            createdAt: "2026-01-01T10:00:00.000Z"
+          }
+        ]
+      };
+    }
+
     return undefined;
   }
 
@@ -438,6 +494,7 @@
     { id: "submit", label: "Submit knowledge", groups: null },
     { id: "work", label: "Problems & initiatives", groups: null },
     { id: "expert", label: "Ask an expert", groups: null },
+    { id: "qa", label: "Q&A", groups: null },
     { id: "review", label: "Review queue", groups: ["Reviewer", "Ops"] },
     { id: "portfolio", label: "Portfolio dashboard", groups: ["Portfolio", "Mgmt", "Ops"] },
     { id: "graph", label: "Knowledge graph", groups: null }
@@ -448,6 +505,7 @@
     submit: SubmitView,
     work: WorkView,
     expert: ExpertView,
+    qa: QaView,
     review: ReviewView,
     portfolio: PortfolioView,
     graph: GraphView
@@ -1026,6 +1084,7 @@
             h("div", { class: "card-head" }, h("h4", {}, recordTitle(p)), statusBadge(p.status)),
             h("p", {}, pick(p.description, "No description.")),
             tagRow(p.tags),
+            h("div", { class: "meta-line" }, "created by " + pick(p.creatorUsername, p.creatorId, "—")),
             h("div", { class: "meta-line" }, "id: " + recordId(p))
           ));
         });
@@ -1033,16 +1092,24 @@
     }
 
     function loadInitiatives() {
-      loadInto(initiativesList, function () { return api("/initiatives"); }, function (data) {
-        var items = asList(data);
+      loadInto(initiativesList, function () {
+        return Promise.all([api("/initiatives"), api("/problems")]);
+      }, function (results) {
+        var items = asList(results[0]);
+        var problems = asList(results[1]);
+        var problemTitleById = {};
+        problems.forEach(function (p) { problemTitleById[recordId(p)] = recordTitle(p); });
+
         if (!items.length) { initiativesList.appendChild(emptyEl("No initiatives yet", "Register one on the left.")); return; }
         items.forEach(function (it) {
           var id = recordId(it);
+          var linkedTitle = it.linkedProblemId ? pick(problemTitleById[it.linkedProblemId], it.linkedProblemId) : null;
           initiativesList.appendChild(h("div", { class: "card card-soft" },
             h("div", { class: "card-head" }, h("h4", {}, recordTitle(it)), statusBadge(it.status)),
             h("p", {}, pick(it.description, "No description.")),
             it.techStack ? h("div", { class: "meta-line" }, "stack: " + it.techStack) : null,
-            it.linkedProblemId ? h("div", { class: "meta-line" }, "linked problem: " + it.linkedProblemId) : null,
+            linkedTitle ? h("div", { class: "meta-line" }, "linked problem: " + linkedTitle) : null,
+            h("div", { class: "meta-line" }, "created by " + pick(it.creatorUsername, it.creatorId, "—")),
             h("div", { class: "card-actions" },
               nudgeButton(id, "link", "Find collaborators"),
               nudgeButton(id, "office-hours", "Request office hours")
@@ -1195,6 +1262,122 @@
       myList
     ));
     loadMyRequests();
+    return view;
+  }
+
+  /* ---------------------------------------------------------- */
+  /* View: Q&A (any user asks; experts (SME group) answer)       */
+  /* ---------------------------------------------------------- */
+  function QaView() {
+    var view = h("div", { class: "view" });
+    var expert = Auth.hasGroup(["SME"]);
+    view.appendChild(sectionHeader("Q&A", expert
+      ? "Answer questions submitted by anyone in the programme."
+      : "Ask the experts a question and see their answers here."));
+
+    var titleF = field({ name: "title", label: "Question title", type: "text", required: true, placeholder: "What do you need to know?" });
+    var contentF = field({ name: "content", label: "Details", type: "textarea", placeholder: "Add any context that will help an expert answer." });
+    var askOut = h("div", {});
+    var askBtn = h("button", { class: "btn btn-primary", type: "submit" }, "Ask");
+    var askForm = h("form", {
+      onsubmit: function (e) {
+        e.preventDefault();
+        var body = { title: titleF._control.value.trim(), content: contentF._control.value.trim() };
+        askBtn.disabled = true;
+        clear(askOut);
+        api("/questions", { method: "POST", body: body })
+          .then(function () {
+            askBtn.disabled = false;
+            askForm.reset();
+            announce("success", "Question submitted.");
+            loadQuestions();
+          })
+          .catch(function (err) {
+            askBtn.disabled = false;
+            askOut.appendChild(alertEl("danger", err.message));
+            announce("danger", err.message);
+          });
+      }
+    }, titleF, contentF, h("div", { class: "row" }, askBtn));
+
+    function qaStatusBadge(status) {
+      return badge(status === "answered" ? "success" : "warn", status || "open");
+    }
+
+    function answerCard(a) {
+      return h("div", { class: "card card-soft" },
+        h("div", { class: "meta-line" }, "answered by " + pick(a.creatorUsername, a.creatorId, "expert")),
+        h("p", {}, pick(a.content, ""))
+      );
+    }
+
+    function answerForm(questionId, onDone) {
+      var f = field({ name: "content", label: "Your answer", type: "textarea", required: true });
+      var btn = h("button", { class: "btn btn-primary btn-sm", type: "submit" }, "Submit answer");
+      return h("form", {
+        class: "row",
+        onsubmit: function (e) {
+          e.preventDefault();
+          var content = f._control.value.trim();
+          if (!content) return;
+          btn.disabled = true;
+          api("/questions/" + encodeURIComponent(questionId) + "/answers", { method: "POST", body: { content: content } })
+            .then(function () {
+              btn.disabled = false;
+              f._control.value = "";
+              announce("success", "Answer submitted.");
+              onDone();
+            })
+            .catch(function (err) { btn.disabled = false; announce("danger", err.message); });
+        }
+      }, f, h("div", { class: "row" }, btn));
+    }
+
+    function questionCard(q) {
+      var id = pick(q.questionId, recordId(q));
+      var answersWrap = h("div", {});
+      var card = h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("h4", {}, pick(q.title, "Untitled question")), qaStatusBadge(q.status)),
+        h("p", {}, pick(q.content, "")),
+        h("div", { class: "meta-line" }, "asked by " + pick(q.creatorUsername, q.creatorId, "—")),
+        answersWrap
+      );
+
+      function loadAnswers() {
+        loadInto(answersWrap, function () { return api("/questions/" + encodeURIComponent(id)); }, function (data) {
+          var answers = asList(data && data.answers);
+          if (!answers.length) { answersWrap.appendChild(emptyEl("No answers yet", "")); return; }
+          answers.forEach(function (a) { answersWrap.appendChild(answerCard(a)); });
+        }, { loadingLabel: "Loading answers…" });
+      }
+
+      if (expert) {
+        card.appendChild(answerForm(id, loadAnswers));
+      }
+      loadAnswers();
+      return card;
+    }
+
+    var list = h("div", {});
+    function loadQuestions() {
+      loadInto(list, function () { return api("/questions"); }, function (data) {
+        var items = asList(data);
+        if (!items.length) {
+          list.appendChild(emptyEl("No questions yet", expert
+            ? "Questions from anyone in the programme will appear here."
+            : "Ask a question above and expert answers will appear here."));
+          return;
+        }
+        items.forEach(function (q) { list.appendChild(questionCard(q)); });
+      }, { loadingLabel: "Loading questions…" });
+    }
+
+    view.appendChild(h("section", {}, h("div", { class: "card" }, askForm), askOut));
+    view.appendChild(h("section", {},
+      h("h3", { class: "subhead" }, expert ? "All questions" : "My questions"),
+      list
+    ));
+    loadQuestions();
     return view;
   }
 
