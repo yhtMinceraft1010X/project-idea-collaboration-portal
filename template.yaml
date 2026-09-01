@@ -485,6 +485,32 @@ Resources:
         - { AttributeName: pk, KeyType: HASH }
         - { AttributeName: sk, KeyType: RANGE }
 
+  GuidanceRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}guidance-requests'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: requesterId, AttributeType: S }
+        - { AttributeName: assigneeId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: RequesterIndex
+          KeySchema:
+            - { AttributeName: requesterId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: AssigneeIndex
+          KeySchema:
+            - { AttributeName: assigneeId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
   # ---------------------------------------------------------------------------
   # SQS queues (+ DLQs)
   # ---------------------------------------------------------------------------
@@ -954,6 +980,11 @@ Resources:
                 Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan]
                 Resource: !GetAtt SmeProfilesTable.Arn
               - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:Query, dynamodb:UpdateItem, dynamodb:BatchGetItem]
+                Resource:
+                  - !GetAtt GuidanceRequestsTable.Arn
+                  - !Sub '${GuidanceRequestsTable.Arn}/index/*'
+              - Effect: Allow
                 Action: dynamodb:PutItem
                 Resource: !GetAtt AuditLogTable.Arn
               - Effect: Allow
@@ -1234,8 +1265,13 @@ Resources:
       Environment:
         Variables:
           TOPIC_SME_ROUTING_ARN: !Ref SmeRoutingTopic
+          TABLE_GUIDANCE_REQUESTS: !Ref GuidanceRequestsTable
       Events:
         GuidanceRequest: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests, Method: post } }
+        ListGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests, Method: get } }
+        ListAssigned: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/assigned, Method: get } }
+        GetGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/{id}, Method: get } }
+        RespondGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/{id}/respond, Method: post } }
 
   NotifierFn:
     Type: AWS::Serverless::Function

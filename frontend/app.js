@@ -344,6 +344,48 @@
       });
       return { nodes: nodes, edges: edges };
     }
+
+    /* Ask-an-expert round-trip (DEV_BYPASS only). */
+    if (path === "/guidance-requests") {
+      if (opts && (opts.method === "POST")) {
+        return { requestId: "demo-" + Date.now(), matchedSmeIds: ["demo-sme-1", "demo-sme-2"] };
+      }
+      return {
+        items: [
+          {
+            requestId: "demo-req-1",
+            query: "How should we structure multi-account IAM for a new landing zone?",
+            requesterId: "demo-user",
+            matchedSmeIds: ["demo-sme-1", "demo-sme-2"],
+            status: "routed",
+            responderId: null,
+            responseComments: null,
+            createdAt: "2026-01-01T09:00:00.000Z"
+          },
+          {
+            requestId: "demo-req-2",
+            query: "Best practice for S3 Vectors index sizing?",
+            requesterId: "demo-user",
+            matchedSmeIds: ["demo-sme-3"],
+            status: "accepted",
+            responderId: "demo-sme-3",
+            responseComments: "Happy to help — let's set up office hours Thursday. Start with one index per entity type.",
+            createdAt: "2026-01-02T09:00:00.000Z"
+          }
+        ]
+      };
+    }
+    if (/^\/guidance-requests\/[^/]+\/respond$/.test(path) && opts && opts.method === "POST") {
+      var decision = (opts.body && opts.body.decision) || "accept";
+      return {
+        requestId: path.split("/")[2],
+        status: decision === "reject" ? "rejected" : "accepted",
+        responderId: "demo-sme-1",
+        responseComments: (opts.body && opts.body.comments) || null,
+        respondedAt: new Date().toISOString()
+      };
+    }
+
     return undefined;
   }
 
@@ -1105,12 +1147,54 @@
             }
             out.appendChild(card);
             announce("success", "Guidance request submitted.");
+            loadMyRequests();
           })
           .catch(function (err) { btn.disabled = false; out.appendChild(alertEl("danger", err.message)); announce("danger", err.message); });
       }
     }, queryF, contextF, h("div", { class: "row" }, btn));
 
+    /* Map a request status to a badge kind. */
+    function statusBadge(status) {
+      var kind = status === "accepted" ? "success" : status === "rejected" ? "danger" : "warn";
+      return badge(kind, status || "routed");
+    }
+
+    function requestCard(r) {
+      var q = pick(r.query, "(no question text)");
+      if (q.length > 140) q = q.slice(0, 140) + "…";
+      var matched = Array.isArray(r.matchedSmeIds) ? r.matchedSmeIds : [];
+      var card = h("div", { class: "card" },
+        h("div", { class: "card-head" },
+          h("h4", {}, q),
+          statusBadge(r.status)
+        ),
+        h("div", { class: "meta-line" },
+          "id: " + pick(r.requestId, recordId(r), "—") +
+          "  ·  matched: " + (matched.length ? matched.join(", ") : "—"))
+      );
+      if (r.status && r.status !== "routed") {
+        card.appendChild(h("h3", { class: "subhead" }, "Expert response"));
+        card.appendChild(h("div", { class: "meta-line" }, "responder: " + pick(r.responderId, "—")));
+        if (r.responseComments) card.appendChild(h("p", {}, r.responseComments));
+      }
+      return card;
+    }
+
+    var myList = h("div", {});
+    function loadMyRequests() {
+      loadInto(myList, function () { return api("/guidance-requests"); }, function (data) {
+        var items = asList(data);
+        if (!items.length) { myList.appendChild(emptyEl("No requests yet", "Your guidance requests and expert responses will appear here.")); return; }
+        items.forEach(function (r) { myList.appendChild(requestCard(r)); });
+      }, { loadingLabel: "Loading your requests…" });
+    }
+
     view.appendChild(h("section", {}, h("div", { class: "card" }, form), out));
+    view.appendChild(h("section", {},
+      h("h3", { class: "subhead" }, "My requests"),
+      myList
+    ));
+    loadMyRequests();
     return view;
   }
 
