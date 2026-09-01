@@ -115,7 +115,8 @@ window.APP_CONFIG = {
   region: "${REGION}",
   userPoolId: "${USER_POOL_ID}",
   userPoolClientId: "${USER_POOL_CLIENT_ID}",
-  cognitoDomain: "${COGNITO_DOMAIN}"
+  cognitoDomain: "${COGNITO_DOMAIN}",
+  passwordPolicy: { minLength: 8, requireUppercase: true, requireLowercase: true, requireNumbers: true, requireSymbols: true }
 };
 EOF
 
