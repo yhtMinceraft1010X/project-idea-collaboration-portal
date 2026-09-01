@@ -1,0 +1,27 @@
+{
+  "name": "digital-hub-knowledge-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Digital Hub Technical Knowledge & Collaboration Platform - serverless AWS backend and SPA",
+  "scripts": {
+    "test": "jest --runInBand",
+    "test:ci": "jest --runInBand --ci"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "roots": [
+      "<rootDir>/test"
+    ],
+    "clearMocks": true,
+    "collectCoverageFrom": [
+      "src/**/*.js"
+    ],
+    "moduleDirectories": [
+      "node_modules",
+      "src/node_modules"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+src/node_modules/
+frontend/node_modules/
+
+# SAM / build artifacts
+.aws-sam/
+cdk.out/
+dist/
+build/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Deploy outputs (generated at deploy time by the pipeline)
+outputs.json
+packaged.yaml
+frontend/config.js
+
+# Local env / editor
+.env
+.env.*
+.DS_Store
+*.log
+.idea/
+.vscode/

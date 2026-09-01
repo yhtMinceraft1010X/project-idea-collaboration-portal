@@ -1,0 +1,1540 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Digital Hub Technical Knowledge & Collaboration Platform - serverless backend
+  (Cognito, API Gateway, Lambda, DynamoDB, S3 Vectors, Bedrock, Step Functions,
+  SQS/SNS/EventBridge) plus a CloudFront-hosted SPA.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: app-193a359c-027ffd1c-
+    Description: Mandatory platform naming prefix for every resource.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: arn:aws:iam::544635841962:policy/brd-architect-deploy-boundary
+    Description: Permissions boundary that every IAM role must attach.
+  LogRetentionDays:
+    Type: Number
+    Default: 731
+    Description: CloudWatch log retention (2 years) per audit requirements.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 30
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Tracing: Active
+    CodeUri: src/
+    Layers:
+      - !Ref DependenciesLayer
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        VECTOR_BUCKET: !Sub '${ResourcePrefix}vectors'
+        EVENT_BUS_NAME: !Sub '${ResourcePrefix}bus-events'
+        EMBED_MODEL_ID: cohere.embed-multilingual-v3
+        CHAT_MODEL_ID: global.anthropic.claude-haiku-4-5-20251001-v1:0
+        CHAT_MODEL_ID_HQ: global.anthropic.claude-sonnet-5
+  Api:
+    TracingEnabled: true
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Shared dependencies layer (AWS SDK v3 clients)
+  # ---------------------------------------------------------------------------
+  DependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub '${ResourcePrefix}deps'
+      Description: AWS SDK v3 clients shared by all functions.
+      ContentUri: layer/
+      CompatibleRuntimes:
+        - nodejs22.x
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs22.x
+
+  # ---------------------------------------------------------------------------
+  # S3 buckets
+  # ---------------------------------------------------------------------------
+  SpaAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}spa-assets'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  IngestionStagingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}ingestion-staging'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-staging
+            Status: Enabled
+            ExpirationInDays: 30
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}assets'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  DashboardSnapshotsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}dashboard-snapshots'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # ---------------------------------------------------------------------------
+  # CloudFront (TLS edge for the SPA)
+  # ---------------------------------------------------------------------------
+  SpaOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ResourcePrefix}oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SpaDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub '${ResourcePrefix}cdn'
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: spa-s3-origin
+            DomainName: !GetAtt SpaAssetsBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SpaOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: spa-s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 10
+
+  SpaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SpaAssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SpaAssetsBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${SpaDistribution.Id}'
+
+  # ---------------------------------------------------------------------------
+  # Cognito (authentication + persona groups)
+  # ---------------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ResourcePrefix}user-pool'
+      MfaConfiguration: 'OFF'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${ResourcePrefix}spa-client'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      CallbackURLs:
+        - !Sub 'https://${SpaDistribution.DomainName}/'
+        - !Sub 'https://${SpaDistribution.DomainName}/index.html'
+      LogoutURLs:
+        - !Sub 'https://${SpaDistribution.DomainName}/'
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${ResourcePrefix}auth'
+      UserPoolId: !Ref UserPool
+
+  LeadGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Lead
+      Description: Initiative / Team Leads
+      Precedence: 10
+      UserPoolId: !Ref UserPool
+  SmeGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: SME
+      Description: Subject Matter Experts
+      Precedence: 20
+      UserPoolId: !Ref UserPool
+  ReviewerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Reviewer
+      Description: Content Reviewers / Moderators
+      Precedence: 30
+      UserPoolId: !Ref UserPool
+  PortfolioGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Portfolio
+      Description: Portfolio Leads / Programme Managers
+      Precedence: 40
+      UserPoolId: !Ref UserPool
+  MgmtGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Mgmt
+      Description: Senior Management / Strategy Leads
+      Precedence: 50
+      UserPoolId: !Ref UserPool
+  OpsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Ops
+      Description: Platform Operators / System Owners
+      Precedence: 60
+      UserPoolId: !Ref UserPool
+
+  # ---------------------------------------------------------------------------
+  # API Gateways
+  # ---------------------------------------------------------------------------
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${ResourcePrefix}api'
+      StageName: prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        AddDefaultAuthorizerToCorsPreflight: false
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  WebhooksApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub '${ResourcePrefix}webhooks-api'
+      StageName: prod
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB tables
+  # ---------------------------------------------------------------------------
+  ProblemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}problems'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: status, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - { AttributeName: status, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  InitiativesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}initiatives'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: leadUserId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+        - { AttributeName: linkedProblemId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: LeadIndex
+          KeySchema:
+            - { AttributeName: leadUserId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: ProblemIndex
+          KeySchema:
+            - { AttributeName: linkedProblemId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  SolutionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}solutions'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  FindingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}findings'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  AssetsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}assets'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  SmeProfilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}sme-profiles'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  RelationshipsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}relationships'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: InvertedIndex
+          KeySchema:
+            - { AttributeName: sk, KeyType: HASH }
+            - { AttributeName: pk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  AuditLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}audit-log'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ReviewQueueTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}review-queue'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: status, AttributeType: S }
+        - { AttributeName: submittedAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - { AttributeName: status, KeyType: HASH }
+            - { AttributeName: submittedAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  AnalyticsSnapshotTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}analytics-snapshot'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  OverlapResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}overlap-results'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  # ---------------------------------------------------------------------------
+  # SQS queues (+ DLQs)
+  # ---------------------------------------------------------------------------
+  ReviewDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-review-dlq'
+      MessageRetentionPeriod: 1209600
+  ReviewQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-review'
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ReviewDlq.Arn
+        maxReceiveCount: 3
+
+  IngestionJiraDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-jira-dlq'
+      MessageRetentionPeriod: 1209600
+  IngestionJiraQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-jira'
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestionJiraDlq.Arn
+        maxReceiveCount: 3
+
+  IngestionConfluenceDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-confluence-dlq'
+      MessageRetentionPeriod: 1209600
+  IngestionConfluenceQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-confluence'
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestionConfluenceDlq.Arn
+        maxReceiveCount: 3
+
+  IngestionGithubDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-github-dlq'
+      MessageRetentionPeriod: 1209600
+  IngestionGithubQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}q-ingestion-github'
+      VisibilityTimeout: 180
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt IngestionGithubDlq.Arn
+        maxReceiveCount: 3
+
+  # ---------------------------------------------------------------------------
+  # SNS topics
+  # ---------------------------------------------------------------------------
+  OverlapNotifyTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}topic-overlap-notify'
+  SmeRoutingTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}topic-sme-routing'
+  OpsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}topic-ops-alerts'
+
+  # ---------------------------------------------------------------------------
+  # EventBridge custom bus
+  # ---------------------------------------------------------------------------
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub '${ResourcePrefix}bus-events'
+
+  # ---------------------------------------------------------------------------
+  # Secrets Manager + SSM parameters
+  # ---------------------------------------------------------------------------
+  JiraSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ResourcePrefix}secret-jira'
+      Description: Jira API token + webhook shared secret
+      SecretString: '{"apiToken":"REPLACE_ME","webhookSecret":"REPLACE_ME","baseUrl":""}'
+  ConfluenceSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ResourcePrefix}secret-confluence'
+      Description: Confluence API token
+      SecretString: '{"apiToken":"REPLACE_ME","baseUrl":""}'
+  GithubSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ResourcePrefix}secret-github'
+      Description: GitHub token + webhook HMAC secret
+      SecretString: '{"token":"REPLACE_ME","webhookSecret":"REPLACE_ME"}'
+  SlackBotSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ResourcePrefix}secret-slack-bot'
+      Description: Slack incoming webhook URL / bot token
+      SecretString: '{"webhookUrl":""}'
+  TeamsWebhookSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ResourcePrefix}secret-teams-webhook'
+      Description: Microsoft Teams incoming webhook URL
+      SecretString: '{"webhookUrl":""}'
+
+  OverlapThresholdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app-193a359c-027ffd1c/overlap-threshold'
+      Type: String
+      Value: '0.75'
+  SyncScheduleParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app-193a359c-027ffd1c/sync-schedule'
+      Type: String
+      Value: 'rate(15 minutes)'
+  FeatureFlagsParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app-193a359c-027ffd1c/feature-flags'
+      Type: String
+      Value: '{"overlapNotifications":true,"smeRouting":true}'
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch log groups (custom-named, 2yr retention)
+  # ---------------------------------------------------------------------------
+  CrudLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-crud'
+      RetentionInDays: !Ref LogRetentionDays
+  SearchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-search'
+      RetentionInDays: !Ref LogRetentionDays
+  ReviewPublishLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-review-publish'
+      RetentionInDays: !Ref LogRetentionDays
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-ingestion'
+      RetentionInDays: !Ref LogRetentionDays
+  OverlapEmbedLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-overlap-embed'
+      RetentionInDays: !Ref LogRetentionDays
+  OverlapClassifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-overlap-classify'
+      RetentionInDays: !Ref LogRetentionDays
+  SmeRouterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-sme-router'
+      RetentionInDays: !Ref LogRetentionDays
+  NotifierLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-notifier'
+      RetentionInDays: !Ref LogRetentionDays
+  DashboardLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-dashboard'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ---------------------------------------------------------------------------
+  # IAM roles (all attach the mandatory permissions boundary)
+  # ---------------------------------------------------------------------------
+  CrudRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-crud'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: crud-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:DeleteItem, dynamodb:Query, dynamodb:Scan, dynamodb:BatchGetItem]
+                Resource:
+                  - !GetAtt ProblemsTable.Arn
+                  - !Sub '${ProblemsTable.Arn}/index/*'
+                  - !GetAtt InitiativesTable.Arn
+                  - !Sub '${InitiativesTable.Arn}/index/*'
+                  - !GetAtt SolutionsTable.Arn
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt SmeProfilesTable.Arn
+                  - !GetAtt RelationshipsTable.Arn
+                  - !Sub '${RelationshipsTable.Arn}/index/*'
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt EventBus.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:PutVectors, s3vectors:QueryVectors, s3vectors:GetVectors, s3vectors:ListVectors, s3vectors:DeleteVectors, s3vectors:GetIndex, s3vectors:ListIndexes]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  SearchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-search'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: search-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:BatchGetItem]
+                Resource:
+                  - !GetAtt ProblemsTable.Arn
+                  - !Sub '${ProblemsTable.Arn}/index/*'
+                  - !GetAtt InitiativesTable.Arn
+                  - !Sub '${InitiativesTable.Arn}/index/*'
+                  - !GetAtt SolutionsTable.Arn
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt SmeProfilesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:QueryVectors, s3vectors:GetVectors, s3vectors:ListVectors]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  ReviewPublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-review-publish'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: review-publish-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query, dynamodb:Scan]
+                Resource:
+                  - !GetAtt ReviewQueueTable.Arn
+                  - !Sub '${ReviewQueueTable.Arn}/index/*'
+                  - !GetAtt ProblemsTable.Arn
+                  - !GetAtt InitiativesTable.Arn
+                  - !GetAtt SolutionsTable.Arn
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt SmeProfilesTable.Arn
+                  - !GetAtt RelationshipsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:SendMessage]
+                Resource: !GetAtt ReviewQueue.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:PutVectors, s3vectors:GetVectors]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  IngestionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-ingestion'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: ingestion-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+                Resource:
+                  - !GetAtt ProblemsTable.Arn
+                  - !GetAtt InitiativesTable.Arn
+                  - !GetAtt SolutionsTable.Arn
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt RelationshipsTable.Arn
+                  - !GetAtt ReviewQueueTable.Arn
+                  - !Sub '${ReviewQueueTable.Arn}/index/*'
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes, sqs:SendMessage]
+                Resource:
+                  - !GetAtt IngestionJiraQueue.Arn
+                  - !GetAtt IngestionConfluenceQueue.Arn
+                  - !GetAtt IngestionGithubQueue.Arn
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref JiraSecret
+                  - !Ref ConfluenceSecret
+                  - !Ref GithubSecret
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject]
+                Resource: !Sub '${IngestionStagingBucket.Arn}/*'
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:PutVectors]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  OverlapEmbedRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-overlap-embed'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: overlap-embed-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:Query]
+                Resource: !GetAtt InitiativesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:PutVectors, s3vectors:QueryVectors, s3vectors:GetVectors]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  OverlapClassifyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-overlap-classify'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: overlap-classify-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt OverlapResultsTable.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem]
+                Resource: !GetAtt InitiativesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+
+  SmeRouterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-sme-router'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: sme-router-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan]
+                Resource: !GetAtt SmeProfilesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SmeRoutingTopic
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action: [s3vectors:QueryVectors, s3vectors:GetVectors]
+                Resource:
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
+                  - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  NotifierRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-notifier'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: notifier-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref SlackBotSecret
+                  - !Ref TeamsWebhookSecret
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+
+  DashboardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-dashboard'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: dashboard-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:Query, dynamodb:Scan, dynamodb:GetItem]
+                Resource:
+                  - !GetAtt ProblemsTable.Arn
+                  - !Sub '${ProblemsTable.Arn}/index/*'
+                  - !GetAtt InitiativesTable.Arn
+                  - !Sub '${InitiativesTable.Arn}/index/*'
+                  - !GetAtt SolutionsTable.Arn
+                  - !GetAtt FindingsTable.Arn
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt OverlapResultsTable.Arn
+                  - !GetAtt RelationshipsTable.Arn
+                  - !Sub '${RelationshipsTable.Arn}/index/*'
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:Query]
+                Resource: !GetAtt AnalyticsSnapshotTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${DashboardSnapshotsBucket.Arn}/*'
+
+  OverlapSfnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-sfn-overlap-detection'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: overlap-sfn-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt OverlapEmbedFn.Arn
+                  - !GetAtt OverlapClassifyFn.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource:
+                  - !Ref OverlapNotifyTopic
+                  - !Ref OpsAlertsTopic
+              - Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords, xray:GetSamplingRules, xray:GetSamplingTargets]
+                Resource: '*'
+
+  EventsToSfnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-events-to-sfn'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: events-start-sfn
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref OverlapDetectionStateMachine
+
+  # ---------------------------------------------------------------------------
+  # Lambda functions
+  # ---------------------------------------------------------------------------
+  CrudFn:
+    Type: AWS::Serverless::Function
+    DependsOn: CrudLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-crud'
+      Handler: handlers/crud.handler
+      Role: !GetAtt CrudRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-crud'
+      Events:
+        CreateProblem: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /problems, Method: post } }
+        ListProblems: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /problems, Method: get } }
+        GetProblem: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/problems/{id}", Method: get } }
+        UpdateProblem: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/problems/{id}", Method: put } }
+        CreateInitiative: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /initiatives, Method: post } }
+        ListInitiatives: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /initiatives, Method: get } }
+        GetInitiative: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/initiatives/{id}", Method: get } }
+        UpdateInitiative: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/initiatives/{id}", Method: put } }
+        CreateSolution: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /solutions, Method: post } }
+        ListSolutions: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /solutions, Method: get } }
+        GetSolution: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/solutions/{id}", Method: get } }
+        CreateFinding: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /findings, Method: post } }
+        ListFindings: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /findings, Method: get } }
+        GetFinding: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/findings/{id}", Method: get } }
+        CreateAsset: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /assets, Method: post } }
+        ListAssets: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /assets, Method: get } }
+        GetAsset: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/assets/{id}", Method: get } }
+        CreateSme: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /sme-profiles, Method: post } }
+        ListSme: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /sme-profiles, Method: get } }
+        GetSme: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/sme-profiles/{id}", Method: get } }
+        Graph: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/graph/{entityType}/{id}", Method: get } }
+        Collaborate: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/nudges/{id}/collaborate", Method: post } }
+
+  SearchFn:
+    Type: AWS::Serverless::Function
+    DependsOn: SearchLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-search'
+      Handler: handlers/search.handler
+      Role: !GetAtt SearchRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-search'
+      Environment:
+        Variables:
+          PARAM_OVERLAP_THRESHOLD: '/app-193a359c-027ffd1c/overlap-threshold'
+      Events:
+        Search: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /search, Method: post } }
+
+  ReviewPublishFn:
+    Type: AWS::Serverless::Function
+    DependsOn: ReviewPublishLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-review-publish'
+      Handler: handlers/submissions.handler
+      Role: !GetAtt ReviewPublishRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-review-publish'
+      Environment:
+        Variables:
+          QUEUE_REVIEW_URL: !Ref ReviewQueue
+      Events:
+        CreateSubmission: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /submissions, Method: post } }
+        ListSubmissions: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /submissions, Method: get } }
+        ApproveSubmission: { Type: Api, Properties: { RestApiId: !Ref Api, Path: "/submissions/{id}/approve", Method: post } }
+        ReviewQueueConsumer:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ReviewQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  IngestionFn:
+    Type: AWS::Serverless::Function
+    DependsOn: IngestionLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-ingestion'
+      Handler: handlers/ingestion.handler
+      Role: !GetAtt IngestionRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-ingestion'
+      Environment:
+        Variables:
+          QUEUE_INGESTION_JIRA_URL: !Ref IngestionJiraQueue
+          QUEUE_INGESTION_CONFLUENCE_URL: !Ref IngestionConfluenceQueue
+          QUEUE_INGESTION_GITHUB_URL: !Ref IngestionGithubQueue
+      Events:
+        JiraWebhook: { Type: Api, Properties: { RestApiId: !Ref WebhooksApi, Path: /webhooks/jira, Method: post } }
+        GithubWebhook: { Type: Api, Properties: { RestApiId: !Ref WebhooksApi, Path: /webhooks/github, Method: post } }
+        JiraQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionJiraQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+        ConfluenceQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionConfluenceQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+        GithubQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestionGithubQueue.Arn
+            BatchSize: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  OverlapEmbedFn:
+    Type: AWS::Serverless::Function
+    DependsOn: OverlapEmbedLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-overlap-embed'
+      Handler: handlers/overlap_embed.handler
+      Role: !GetAtt OverlapEmbedRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-overlap-embed'
+      Environment:
+        Variables:
+          PARAM_OVERLAP_THRESHOLD: '/app-193a359c-027ffd1c/overlap-threshold'
+
+  OverlapClassifyFn:
+    Type: AWS::Serverless::Function
+    DependsOn: OverlapClassifyLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-overlap-classify'
+      Handler: handlers/overlap_classify.handler
+      Role: !GetAtt OverlapClassifyRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-overlap-classify'
+
+  SmeRouterFn:
+    Type: AWS::Serverless::Function
+    DependsOn: SmeRouterLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-sme-router'
+      Handler: handlers/guidance.handler
+      Role: !GetAtt SmeRouterRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-sme-router'
+      Environment:
+        Variables:
+          TOPIC_SME_ROUTING_ARN: !Ref SmeRoutingTopic
+      Events:
+        GuidanceRequest: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests, Method: post } }
+
+  NotifierFn:
+    Type: AWS::Serverless::Function
+    DependsOn: NotifierLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-notifier'
+      Handler: handlers/notifier.handler
+      Role: !GetAtt NotifierRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-notifier'
+      Events:
+        OverlapNotify:
+          Type: SNS
+          Properties:
+            Topic: !Ref OverlapNotifyTopic
+        SmeRouting:
+          Type: SNS
+          Properties:
+            Topic: !Ref SmeRoutingTopic
+
+  DashboardFn:
+    Type: AWS::Serverless::Function
+    DependsOn: DashboardLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-dashboard'
+      Handler: handlers/dashboard.handler
+      Role: !GetAtt DashboardRole.Arn
+      Timeout: 120
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-dashboard'
+      Events:
+        GetPortfolio: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /dashboard/portfolio, Method: get } }
+
+  # ---------------------------------------------------------------------------
+  # Step Functions: overlap detection workflow
+  # ---------------------------------------------------------------------------
+  OverlapDetectionStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub '${ResourcePrefix}sfn-overlap-detection'
+      Type: STANDARD
+      Role: !GetAtt OverlapSfnRole.Arn
+      Tracing:
+        Enabled: true
+      Definition:
+        Comment: Embed a new initiative, search for similar active initiatives, classify overlaps, persist and notify.
+        StartAt: EmbedAndSearch
+        States:
+          EmbedAndSearch:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt OverlapEmbedFn.Arn
+              Payload.$: $
+            ResultSelector:
+              initiativeId.$: $.Payload.initiativeId
+              candidates.$: $.Payload.candidates
+            ResultPath: $.embed
+            Retry:
+              - ErrorEquals: [States.ALL]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyOpsAndFail
+            Next: Classify
+          Classify:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: !GetAtt OverlapClassifyFn.Arn
+              Payload:
+                initiativeId.$: $.embed.initiativeId
+                candidates.$: $.embed.candidates
+            ResultSelector:
+              results.$: $.Payload.results
+            ResultPath: $.classify
+            Retry:
+              - ErrorEquals: [States.ALL]
+                IntervalSeconds: 2
+                MaxAttempts: 3
+                BackoffRate: 2.0
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: $.error
+                Next: NotifyOpsAndFail
+            Next: Notify
+          Notify:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref OverlapNotifyTopic
+              Subject: Overlap detection results
+              Message.$: States.JsonToString($.classify)
+            End: true
+          NotifyOpsAndFail:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref OpsAlertsTopic
+              Subject: Overlap detection failed
+              Message.$: States.JsonToString($.error)
+            Next: FailState
+          FailState:
+            Type: Fail
+            Error: OverlapDetectionFailed
+            Cause: The overlap-detection workflow failed; see ops alerts.
+
+  # ---------------------------------------------------------------------------
+  # EventBridge rules
+  # ---------------------------------------------------------------------------
+  InitiativeRegisteredRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}rule-initiative-registered'
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: [digitalhub.portal]
+        detail-type: [initiative-registered]
+      State: ENABLED
+      Targets:
+        - Arn: !Ref OverlapDetectionStateMachine
+          Id: OverlapSfnTarget
+          RoleArn: !GetAtt EventsToSfnRole.Arn
+
+  ConfluencePollRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}rule-confluence-poll'
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestionFn.Arn
+          Id: ConfluencePollTarget
+          Input: '{"trigger":"poll","source":"confluence"}'
+
+  JiraPollRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}rule-jira-poll'
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestionFn.Arn
+          Id: JiraPollTarget
+          Input: '{"trigger":"poll","source":"jira"}'
+
+  DashboardWeeklyRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}rule-dashboard-weekly'
+      ScheduleExpression: rate(7 days)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DashboardFn.Arn
+          Id: DashboardWeeklyTarget
+          Input: '{"trigger":"schedule"}'
+
+  ConfluencePollPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionFn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfluencePollRule.Arn
+  JiraPollPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionFn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt JiraPollRule.Arn
+  DashboardWeeklyPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardFn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DashboardWeeklyRule.Arn
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch alarms (DLQ depth) + ops dashboard
+  # ---------------------------------------------------------------------------
+  ReviewDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}alarm-review-dlq'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt ReviewDlq.QueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpsAlertsTopic
+  IngestionJiraDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}alarm-ingestion-jira-dlq'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt IngestionJiraDlq.QueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpsAlertsTopic
+  IngestionConfluenceDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}alarm-ingestion-confluence-dlq'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt IngestionConfluenceDlq.QueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpsAlertsTopic
+  IngestionGithubDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}alarm-ingestion-github-dlq'
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - { Name: QueueName, Value: !GetAtt IngestionGithubDlq.QueueName }
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref OpsAlertsTopic
+
+  OpsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ResourcePrefix}dashboard-ops'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda errors",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ResourcePrefix}fn-crud"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ResourcePrefix}fn-search"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ResourcePrefix}fn-ingestion"],
+                  ["AWS/Lambda", "Errors", "FunctionName", "${ResourcePrefix}fn-review-publish"]
+                ],
+                "stat": "Sum", "period": 300
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "DLQ depth",
+                "region": "${AWS::Region}",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ResourcePrefix}q-review-dlq"],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ResourcePrefix}q-ingestion-jira-dlq"],
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${ResourcePrefix}q-ingestion-github-dlq"]
+                ],
+                "stat": "Maximum", "period": 300
+              }
+            }
+          ]
+        }
+
+Outputs:
+  AppUrl:
+    Description: Public application URL (CloudFront-hosted SPA).
+    Value: !Sub 'https://${SpaDistribution.DomainName}'
+  ApiUrl:
+    Description: Base URL of the authenticated application REST API.
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  WebhookApiUrl:
+    Description: Base URL of the (unauthenticated, secret-validated) webhook API.
+    Value: !Sub 'https://${WebhooksApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  CognitoDomain:
+    Value: !Sub 'https://${ResourcePrefix}auth.auth.${AWS::Region}.amazoncognito.com'
+  SpaBucketName:
+    Value: !Ref SpaAssetsBucket
+  DistributionId:
+    Value: !Ref SpaDistribution
+  Region:
+    Value: !Ref AWS::Region

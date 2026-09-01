@@ -1,0 +1,7 @@
+{
+  "name": "digital-hub-knowledge-portal-fns",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lambda handler code for the Digital Hub Knowledge & Collaboration Platform. Runtime AWS SDK dependencies are provided by the shared dependencies layer (see ../layer).",
+  "main": "index.js"
+}
