@@ -79,7 +79,6 @@ const config = {
     analyticsSnapshot: tableName('TABLE_ANALYTICS_SNAPSHOT', 'analytics-snapshot'),
     overlapResults: tableName('TABLE_OVERLAP_RESULTS', 'overlap-results'),
     guidanceRequests: tableName('TABLE_GUIDANCE_REQUESTS', 'guidance-requests'),
-    qa: tableName('TABLE_QA', 'qa'),
   },
 
   buckets: {
