@@ -1270,8 +1270,8 @@ Resources:
         GuidanceRequest: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests, Method: post } }
         ListGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests, Method: get } }
         ListAssigned: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/assigned, Method: get } }
-        GetGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: '/guidance-requests/{id}', Method: get } }
-        RespondGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: '/guidance-requests/{id}/respond', Method: post } }
+        GetGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/{id}, Method: get } }
+        RespondGuidance: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /guidance-requests/{id}/respond, Method: post } }
 
   NotifierFn:
     Type: AWS::Serverless::Function
