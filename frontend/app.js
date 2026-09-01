@@ -22,6 +22,33 @@
     return !!(c && c.apiUrl && c.region && c.userPoolId && c.userPoolClientId);
   }
 
+  /* ----------------------------------------------------------
+     LOCAL DEV BYPASS — never active against a real backend.
+     It only turns on when the pool id is the local preview stub
+     (see frontend/config.js). Any deployed pool id (e.g.
+     "ap-southeast-1_ab12CdEfG") will NOT match, so sign-up/confirm/
+     login always hit real Cognito in a deployed build.
+     When on: sign-up sends no email, confirm accepts any code, and
+     login mints a local unsigned JWT so the app shell renders.
+     ---------------------------------------------------------- */
+  var DEV_BYPASS = !!(CONFIG && CONFIG.userPoolId === "ap-southeast-1_LOCALSTUB");
+
+  /* Build an unsigned JWT that decodeJwt() can read (base64url payload).
+     NOT a valid Cognito token — for local UI preview only. */
+  function fakeIdToken(email, groups) {
+    function b64url(obj) {
+      return btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    var header = { alg: "none", typ: "JWT" };
+    var payload = {
+      email: email || "dev@example.com",
+      "cognito:username": email || "dev@example.com",
+      "cognito:groups": groups || ["Lead", "SME", "Reviewer", "Portfolio", "Mgmt", "Ops"],
+      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 8
+    };
+    return b64url(header) + "." + b64url(payload) + ".";
+  }
+
   /* localStorage keys for the Cognito token set */
   var LS = {
     id: "dh_idToken",
@@ -191,6 +218,10 @@
     },
 
     signUp: function (email, password) {
+      if (DEV_BYPASS) {
+        /* No Cognito call, so no confirmation email is sent. */
+        return Promise.resolve({ UserConfirmed: false, _devBypass: true });
+      }
       return this.cognito("SignUp", {
         ClientId: CONFIG.userPoolClientId,
         Username: email,
@@ -200,6 +231,10 @@
     },
 
     confirm: function (email, code) {
+      if (DEV_BYPASS) {
+        /* Accept any code locally. */
+        return Promise.resolve({ _devBypass: true });
+      }
       return this.cognito("ConfirmSignUp", {
         ClientId: CONFIG.userPoolClientId,
         Username: email,
@@ -209,6 +244,12 @@
 
     login: function (email, password) {
       var self = this;
+      if (DEV_BYPASS) {
+        /* Mint a local unsigned token so the app shell renders. */
+        localStorage.setItem(LS.id, fakeIdToken(email));
+        self.user();
+        return Promise.resolve({ _devBypass: true });
+      }
       return this.cognito("InitiateAuth", {
         AuthFlow: "USER_PASSWORD_AUTH",
         ClientId: CONFIG.userPoolClientId,
@@ -533,11 +574,66 @@
 
     function signupForm() {
       var emailF = field({ name: "email", label: "Work email", type: "email", required: true, placeholder: "you@example.com", autocomplete: "username" });
-      var passF = field({ name: "password", label: "Password", type: "password", required: true, help: "Use your pool's policy (length, upper/lower, number, symbol).", autocomplete: "new-password" });
+      var passF = field({ name: "password", label: "Password", type: "password", required: true, autocomplete: "new-password" });
       var submit = h("button", { class: "btn btn-primary btn-block", type: "submit" }, "Create account");
+
+      /* Build password rules from the pool's policy (CONFIG.passwordPolicy),
+         falling back to Cognito defaults when the policy is absent. */
+      var policy = (CONFIG && CONFIG.passwordPolicy) || {};
+      var minLength = typeof policy.minLength === "number" ? policy.minLength : 8;
+      var hasPolicy = CONFIG && CONFIG.passwordPolicy;
+      var rules = [];
+      rules.push({
+        label: "At least " + minLength + " characters",
+        test: function (v) { return v.length >= minLength; }
+      });
+      if (!hasPolicy || policy.requireUppercase) {
+        rules.push({ label: "One uppercase letter", test: function (v) { return /[A-Z]/.test(v); } });
+      }
+      if (!hasPolicy || policy.requireLowercase) {
+        rules.push({ label: "One lowercase letter", test: function (v) { return /[a-z]/.test(v); } });
+      }
+      if (!hasPolicy || policy.requireNumbers) {
+        rules.push({ label: "One number", test: function (v) { return /[0-9]/.test(v); } });
+      }
+      if (!hasPolicy || policy.requireSymbols) {
+        rules.push({ label: "One symbol", test: function (v) { return /[^A-Za-z0-9]/.test(v); } });
+      }
+
+      var checklist = h("ul", { class: "pw-checklist", "aria-live": "polite" });
+      rules.forEach(function (rule) {
+        var icon = h("span", { class: "pw-icon", "aria-hidden": "true" }, "\u2717");
+        var li = h("li", { class: "pw-rule" }, icon, h("span", {}, rule.label));
+        li._icon = icon;
+        li._rule = rule;
+        checklist.appendChild(li);
+      });
+
+      function updateChecklist() {
+        var v = passF._control.value;
+        for (var i = 0; i < checklist.childNodes.length; i++) {
+          var li = checklist.childNodes[i];
+          var met = li._rule.test(v);
+          li._icon.textContent = met ? "\u2713" : "\u2717";
+          if (met) li.classList.add("is-met"); else li.classList.remove("is-met");
+        }
+      }
+      passF._control.addEventListener("input", updateChecklist);
+      updateChecklist();
+
+      function allRulesPass() {
+        var v = passF._control.value;
+        return rules.every(function (rule) { return rule.test(v); });
+      }
+
       return h("form", {
         onsubmit: function (e) {
           e.preventDefault();
+          if (!allRulesPass()) {
+            setAuthAlert("danger", "Password does not meet all requirements.");
+            passF._control.focus();
+            return;
+          }
           var email = emailF._control.value.trim();
           busy(submit, true);
           Auth.signUp(email, passF._control.value)
@@ -549,14 +645,22 @@
             })
             .catch(function (err) { busy(submit, false, "Create account"); setAuthAlert("danger", err.message); });
         }
-      }, emailF, passF, submit);
+      }, emailF, passF, checklist, submit);
     }
 
     function confirmForm() {
       var emailF = field({ name: "email", label: "Work email", type: "email", required: true, value: state.authPrefillEmail, autocomplete: "username" });
       var codeF = field({ name: "code", label: "Confirmation code", type: "text", required: true, placeholder: "6-digit code", autocomplete: "one-time-code" });
       var submit = h("button", { class: "btn btn-primary btn-block", type: "submit" }, "Confirm account");
-      return h("form", {
+      var intro = h("div", { class: "auth-confirm-intro" },
+        h("h2", { class: "auth-confirm-title" }, "Confirm your account"),
+        h("p", { class: "auth-confirm-hint" }, "We emailed a confirmation code to your inbox. Enter it below to activate your account.")
+      );
+      var back = h("button", {
+        class: "auth-link", type: "button",
+        onclick: function () { state.authMode = "login"; rerender(); }
+      }, "← Back to sign in");
+      var form = h("form", {
         onsubmit: function (e) {
           e.preventDefault();
           var email = emailF._control.value.trim();
@@ -571,6 +675,7 @@
             .catch(function (err) { busy(submit, false, "Confirm account"); setAuthAlert("danger", err.message); });
         }
       }, emailF, codeF, submit);
+      return h("div", { class: "auth-confirm" }, intro, form, back);
     }
 
     var formArea = h("div", {});
@@ -584,8 +689,9 @@
     var card = h("div", { class: "card auth-card" },
       h("div", { class: "auth-tabs", role: "tablist" },
         tab("login", "Sign in"),
-        tab("signup", "Create account"),
-        tab("confirm", "Confirm")
+        tab("signup", "Create account")
+        /* "Confirm" is intentionally not a tab: it is only reachable
+           after a successful sign-up (see signupForm), so it stays hidden. */
       ),
       localAlert,
       formArea

@@ -192,6 +192,13 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub '${ResourcePrefix}user-pool'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
       MfaConfiguration: 'OFF'
       AutoVerifiedAttributes:
         - email
