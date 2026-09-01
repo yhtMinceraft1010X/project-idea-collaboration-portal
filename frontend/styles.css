@@ -448,13 +448,28 @@ code.inline { background: var(--code-inline-bg); color: var(--code-inline-text);
 
 .auth-panel { display: grid; place-items: center; padding: var(--space-6) var(--space-4); }
 .auth-card { width: 100%; max-width: 420px; }
-.auth-tabs { display: flex; gap: var(--space-2); margin-bottom: var(--space-4); }
+.auth-tabs { display: flex; justify-content: center; gap: var(--space-4); margin-bottom: var(--space-4); }
 .auth-tab {
   font: inherit; font-size: var(--text-sm); font-weight: 600;
   border: none; background: transparent; color: var(--text-muted);
   padding: var(--space-2) 0; cursor: pointer; border-bottom: 2px solid transparent;
 }
 .auth-tab.is-active { color: var(--accent-strong); border-bottom-color: var(--accent); }
+.pw-checklist { list-style: none; margin: var(--space-2) 0 var(--space-4); padding: 0; display: grid; gap: var(--space-2); }
+.pw-rule { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-muted); }
+.pw-rule.is-met { color: var(--accent-strong); }
+.pw-icon { width: 1.1em; text-align: center; font-weight: 700; }
+
+/* Confirm view — reached only after sign-up, so it reads as its own step */
+.auth-confirm-intro { margin-bottom: var(--space-4); }
+.auth-confirm-title { font-size: var(--text-lg); font-weight: 700; margin: 0 0 var(--space-2); }
+.auth-confirm-hint { font-size: var(--text-sm); color: var(--text-muted); margin: 0; }
+.auth-link {
+  font: inherit; font-size: var(--text-sm); font-weight: 600;
+  border: none; background: transparent; color: var(--accent-strong);
+  padding: var(--space-3) 0 0; cursor: pointer; display: inline-block;
+}
+.auth-link:hover { text-decoration: underline; }
 
 /* ============================================================
    Knowledge graph
