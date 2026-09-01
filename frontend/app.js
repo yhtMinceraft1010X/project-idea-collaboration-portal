@@ -315,10 +315,47 @@
   }
 
   /* ---------------------------------------------------------- */
+  /* mockApi(): LOCAL-PREVIEW ONLY (DEV_BYPASS). Returns canned  */
+  /* responses so views can be exercised without a backend.      */
+  /* NEVER runs against a real backend — only when CONFIG points  */
+  /* at the ap-southeast-1_LOCALSTUB user pool. Returns undefined */
+  /* for anything it doesn't handle (caller resolves undefined).  */
+  /* ---------------------------------------------------------- */
+  function mockApi(path, opts) {
+    /* Knowledge-graph read: /graph/{entityType}/{id} (both URI-encoded). */
+    /* Shape matches src/handlers/crud.js getGraph():                     */
+    /*   { nodes: [{ id, entityType }], edges: [{ from, to, type }] }     */
+    /* where from/to are composite keys `entityType + '#' + id`.          */
+    if (path.indexOf("/graph/") === 0) {
+      var parts = path.split("/"); /* ["", "graph", entityType, id] */
+      var rootType = decodeURIComponent(parts[2] || "");
+      var rootId = decodeURIComponent(parts[3] || "");
+      var linked = [
+        { id: "demo-init-1", entityType: "initiatives", type: "addressed-by" },
+        { id: "demo-sol-1", entityType: "solutions", type: "resolved-by" },
+        { id: "demo-sme-1", entityType: "sme-profiles", type: "advised-by" }
+      ];
+      var nodes = [{ id: rootId, entityType: rootType }];
+      var edges = [];
+      var rootKey = rootType + "#" + rootId;
+      linked.forEach(function (n) {
+        nodes.push({ id: n.id, entityType: n.entityType });
+        edges.push({ from: rootKey, to: n.entityType + "#" + n.id, type: n.type });
+      });
+      return { nodes: nodes, edges: edges };
+    }
+    return undefined;
+  }
+
+  /* ---------------------------------------------------------- */
   /* api(): fetch helper — injects raw IdToken as Authorization  */
   /* ---------------------------------------------------------- */
   function api(path, opts) {
     opts = opts || {};
+    if (DEV_BYPASS) {
+      var mock = mockApi(path, opts);
+      if (mock !== undefined) return Promise.resolve(mock);
+    }
     var headers = { "Content-Type": "application/json" };
     var token = Auth.idToken();
     if (token) headers["Authorization"] = token; /* raw token, NO "Bearer " prefix */
@@ -717,7 +754,7 @@
     }
 
     var card = h("div", { class: "card auth-card" },
-      h("div", { class: "auth-tabs", role: "tablist" },
+      state.authMode === "confirm" ? null : h("div", { class: "auth-tabs", role: "tablist" },
         tab("login", "Sign in"),
         tab("signup", "Create account")
         /* "Confirm" is intentionally not a tab: it is only reachable
@@ -1254,15 +1291,17 @@
 
     /* --- lightweight radial SVG --- */
     var W = 640, H = 420, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 70;
+    function nodeKey(n) { return pick(n.entityType, '') + '#' + pick(n.id, recordId(n)); }
+    var rootKey = rootType + '#' + rootId;
     var pos = {};
-    var rootIdx = nodes.map(recordId).indexOf(rootId);
+    var rootIdx = nodes.map(nodeKey).indexOf(rootKey);
     nodes.forEach(function (n, i) {
-      var nid = pick(n.id, recordId(n));
-      if (nid === rootId || (rootIdx === -1 && i === 0)) { pos[nid] = { x: cx, y: cy }; return; }
+      var key = nodeKey(n);
+      if (key === rootKey || (rootIdx === -1 && i === 0)) { pos[key] = { x: cx, y: cy }; return; }
       var others = nodes.length - 1 || 1;
       var slot = (rootIdx === -1) ? i : (i < rootIdx ? i : i - 1);
       var ang = (slot / others) * Math.PI * 2 - Math.PI / 2;
-      pos[nid] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
+      pos[key] = { x: cx + R * Math.cos(ang), y: cy + R * Math.sin(ang) };
     });
 
     var SVG = "http://www.w3.org/2000/svg";
@@ -1285,10 +1324,11 @@
     });
 
     nodes.forEach(function (n) {
+      var key = nodeKey(n);
       var nid = pick(n.id, recordId(n));
-      var p = pos[nid];
+      var p = pos[key];
       if (!p) return;
-      var isRoot = nid === rootId;
+      var isRoot = key === rootKey;
       svg.appendChild(svgEl("circle", {
         cx: p.x, cy: p.y, r: isRoot ? 12 : 8,
         fill: isRoot ? "#5B54F5" : "#FFFFFF",
