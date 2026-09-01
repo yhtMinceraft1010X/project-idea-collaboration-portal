@@ -144,6 +144,21 @@ a { color: var(--accent-strong); }
   min-height: 100vh;
 }
 
+/* Sidebar visibility is driven by .nav-open / .nav-closed on the shell so the
+   toggle works at every viewport size. On wide viewports the sidebar owns its
+   own grid column, so showing it pushes the content across, never over it. */
+.app-shell.nav-closed { grid-template-columns: 1fr; }
+.app-shell.nav-closed > .sidebar { display: none; }
+
+/* Backdrop for the off-canvas drawer (narrow viewports only). Declared here —
+   fixed and hidden — so it never becomes a grid child of the shell. */
+.scrim {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(20, 20, 50, 0.35);
+  z-index: 35;
+}
+
 /* ---------- side nav ---------- */
 .sidebar {
   background: var(--rail);
@@ -207,11 +222,11 @@ a { color: var(--accent-strong); }
 .main { min-width: 0; }
 .content { max-width: 1020px; margin: 0 auto; padding: var(--space-6) var(--space-4) var(--space-7); }
 
-/* mobile top bar (hidden on desktop) */
+/* top bar — always present; it carries the sidebar toggle at every size */
 .topbar {
-  display: none;
+  display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   background: var(--rail);
@@ -225,6 +240,12 @@ a { color: var(--accent-strong); }
   border-radius: var(--radius-pill);
   padding: 0.45rem var(--space-3);
   cursor: pointer;
+  flex: none;
+}
+.menu-btn:hover { border-color: var(--accent); color: var(--accent-strong); }
+/* The sidebar already shows the brand, so drop the duplicate while it is open */
+@media (min-width: 861px) {
+  .app-shell:not(.nav-closed) .topbar-title { display: none; }
 }
 
 /* ============================================================
@@ -482,8 +503,11 @@ code.inline { background: var(--code-inline-bg); color: var(--code-inline-text);
    Responsive
    ============================================================ */
 @media (max-width: 860px) {
-  .app-shell { grid-template-columns: 1fr; }
-  .topbar { display: flex; }
+  /* Too narrow to push the content aside, so the sidebar slides over it as a
+     drawer instead. It stays in the DOM either way so the slide can animate. */
+  .app-shell,
+  .app-shell.nav-closed { grid-template-columns: 1fr; }
+  .app-shell.nav-closed > .sidebar { display: flex; }
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: 40;
     width: 280px; height: 100vh;
@@ -491,9 +515,8 @@ code.inline { background: var(--code-inline-bg); color: var(--code-inline-text);
     transition: transform 200ms ease;
     box-shadow: var(--shadow-card);
   }
-  .sidebar.is-open { transform: translateX(0); }
-  .scrim { display: none; position: fixed; inset: 0; background: rgba(20,20,50,0.35); z-index: 35; }
-  .scrim.is-open { display: block; }
+  .app-shell.nav-open > .sidebar { transform: translateX(0); }
+  .app-shell.nav-open > .scrim { display: block; }
   .split { grid-template-columns: 1fr; }
   .content { padding: var(--space-4) var(--space-4) var(--space-6); }
   .auth-screen { grid-template-columns: 1fr; }

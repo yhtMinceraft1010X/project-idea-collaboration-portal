@@ -413,6 +413,8 @@
     if (!configIsUsable(CONFIG)) { root.appendChild(ConfigNotice()); return; }
     if (!Auth.isAuthed()) { root.appendChild(AuthView()); return; }
 
+    /* Start shown where there is room for it, hidden where there is not */
+    state.navOpen = isWideViewport();
     root.appendChild(Shell());
     navigate(pickInitialView());
   }
@@ -462,8 +464,14 @@
     var scrim = h("div", { class: "scrim", id: "scrim", onclick: closeNav });
 
     var topbar = h("div", { class: "topbar" },
-      h("button", { class: "menu-btn", type: "button", "aria-label": "Open navigation", onclick: openNav }, "☰ Menu"),
-      h("strong", {}, "Digital Hub")
+      h("button", {
+        class: "menu-btn", type: "button", id: "nav-toggle",
+        "aria-controls": "sidebar",
+        "aria-expanded": state.navOpen ? "true" : "false",
+        "aria-label": (state.navOpen ? "Hide" : "Show") + " navigation",
+        onclick: toggleNav
+      }, (state.navOpen ? "✕" : "☰") + " Menu"),
+      h("strong", { class: "topbar-title" }, "Digital Hub")
     );
 
     var main = h("main", { class: "main" },
@@ -474,19 +482,41 @@
       )
     );
 
-    return h("div", { class: "app-shell" }, sidebar, scrim, main);
+    return h("div", {
+      class: "app-shell " + (state.navOpen ? "nav-open" : "nav-closed"),
+      id: "app-shell"
+    }, sidebar, scrim, main);
   }
 
-  function openNav() {
-    var s = document.getElementById("sidebar"), sc = document.getElementById("scrim");
-    if (s) s.classList.add("is-open");
-    if (sc) sc.classList.add("is-open");
+  /* ---------------------------------------------------------- */
+  /* Sidebar visibility                                          */
+  /* ---------------------------------------------------------- */
+
+  /* Above this width the sidebar takes a grid column and pushes the content
+     across; below it there is no room, so it slides over as a drawer. Must
+     match the breakpoint in styles.css. */
+  var WIDE_NAV = "(min-width: 861px)";
+  function isWideViewport() { return window.matchMedia(WIDE_NAV).matches; }
+
+  function setNav(open) {
+    state.navOpen = !!open;
+    var shell = document.getElementById("app-shell");
+    if (shell) {
+      shell.classList.toggle("nav-open", state.navOpen);
+      shell.classList.toggle("nav-closed", !state.navOpen);
+    }
+    var btn = document.getElementById("nav-toggle");
+    if (btn) {
+      btn.setAttribute("aria-expanded", state.navOpen ? "true" : "false");
+      btn.setAttribute("aria-label", (state.navOpen ? "Hide" : "Show") + " navigation");
+      btn.textContent = (state.navOpen ? "✕" : "☰") + " Menu";
+    }
   }
-  function closeNav() {
-    var s = document.getElementById("sidebar"), sc = document.getElementById("scrim");
-    if (s) s.classList.remove("is-open");
-    if (sc) sc.classList.remove("is-open");
-  }
+  function toggleNav() { setNav(!state.navOpen); }
+  function closeNav() { setNav(false); }
+
+  /* Navigating only dismisses the sidebar while it is covering the content */
+  function closeNavIfOverlay() { if (!isWideViewport()) setNav(false); }
 
   function navigate(viewId) {
     var item = NAV.filter(function (n) { return n.id === viewId; })[0];
@@ -508,7 +538,7 @@
     clearStatus();
     var render = VIEWS[viewId] || DiscoverView;
     container.appendChild(render());
-    closeNav();
+    closeNavIfOverlay();
     /* move focus to the new view heading for keyboard/AT users */
     var heading = container.querySelector("h1, h2");
     if (heading) { heading.setAttribute("tabindex", "-1"); heading.focus(); }
@@ -1313,6 +1343,21 @@
   /* ---------------------------------------------------------- */
   /* Boot                                                        */
   /* ---------------------------------------------------------- */
+
+  /* Escape dismisses the sidebar while it is covering the content */
+  document.addEventListener("keydown", function (e) {
+    if ((e.key === "Escape" || e.key === "Esc") && state.navOpen && !isWideViewport()) closeNav();
+  });
+
+  /* Crossing the breakpoint re-applies that size's default, so a sidebar opened
+     on a wide window does not end up parked over a narrowed one */
+  (function () {
+    var mq = window.matchMedia(WIDE_NAV);
+    var onChange = function (e) { setNav(e.matches); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  })();
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", mount);
   } else {
