@@ -82,9 +82,11 @@ The platform runs these; you can run them locally with AWS credentials for
 `deploy.sh` is idempotent and, in order: ensures the artifacts bucket exists;
 creates the S3 Vectors bucket + one index per entity (via the `s3vectors` CLI —
 these are not CloudFormation resources, like ECR); `npm install` then `sam build`;
-`sam deploy` into the `app-193a359c-027ffd1c-portal` stack; then generates
-`frontend/config.js`, uploads the SPA, invalidates CloudFront, and writes
-`outputs.json`.
+`sam deploy` into the `app-193a359c-027ffd1c-portal` stack; ensures a fixed set
+of platform users exist in the Cognito user pool and belong to every persona
+group (via `admin-create-user` / `admin-add-user-to-group` — also not
+CloudFormation resources); then generates `frontend/config.js`, uploads the
+SPA, invalidates CloudFront, and writes `outputs.json`.
 
 ### After the first deploy
 Third-party integrations ship with placeholder secrets. To enable them, set the
@@ -98,6 +100,11 @@ real values (never commit them) in AWS Secrets Manager:
 Users self-sign-up in the SPA (email + password, no MFA). Assign a user to a
 Cognito group (Lead/SME/Reviewer/Portfolio/Mgmt/Ops) to unlock role-gated
 features (review queue, portfolio dashboard).
+
+Three platform users (`hminshen@dsta.gov.sg`, `limjiayivenusw@gmail.com`,
+`tayyihsuen@gmail.com`) are provisioned by `deploy.sh` and added to every
+persona group on every deploy, so they have full role-gated access without
+needing to self-sign-up and be assigned groups manually.
 
 ## Testing
 
