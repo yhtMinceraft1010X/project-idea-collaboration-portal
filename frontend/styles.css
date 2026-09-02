@@ -460,7 +460,7 @@ code.inline { background: var(--code-inline-bg); color: var(--code-inline-text);
   display: flex; flex-direction: column; justify-content: center; gap: var(--space-4);
   border-right: 1px solid var(--border);
 }
-.auth-aside .brand-logo { width: 56px; height: 56px; }
+.auth-aside .brand-logo { width: 48px; height: 48px; }
 .auth-aside h1 { font-size: var(--text-2xl); letter-spacing: -0.028em; line-height: var(--leading-tight); margin: 0; }
 .auth-aside p { color: var(--text-muted); font-size: var(--text-md); max-width: 46ch; margin: 0; }
 .auth-aside ul { margin: 0; padding-left: var(--space-4); color: var(--text-muted); max-width: 46ch; }
