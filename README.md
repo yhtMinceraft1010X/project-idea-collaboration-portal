@@ -25,7 +25,6 @@ Pushes to `main` trigger the platform's build pipeline, which runs `./deploy.sh`
 | Portfolio dashboard | `fn-dashboard` aggregates weekly (themes, overlap hotspots, reuse rate, gaps) to DynamoDB + S3 | 8 |
 | AuthN/Z | Cognito user pool + hosted groups (Lead/SME/Reviewer/Portfolio/Mgmt/Ops); API Gateway Cognito authorizer + per-route group checks | 9 |
 | Observability | Per-function CloudWatch log groups (2-yr retention), X-Ray tracing, SQS DLQs + depth alarms → ops SNS topic | 10 |
-| Q&A with experts | `fn-qa` (`/questions`, `/questions/{id}`, `/questions/{id}/answers`): any user asks a question; any SME-group member ("expert") sees every question and can answer; the asker sees their own questions and every expert answer to them | added |
 
 Notifications (`fn-notifier`) fan out from the overlap and SME-routing SNS topics
 to Slack/Teams incoming webhooks.
@@ -51,7 +50,7 @@ EventBridge (schedules) → ingestion poll / weekly dashboard
 ```
 
 - **Compute:** Lambda (Node.js 22) + Step Functions. No servers, no VPC/NAT (uses the account defaults only where required; this app is fully serverless).
-- **Data:** DynamoDB (six entity tables + relationships, audit-log, review-queue, analytics-snapshot, overlap-results, guidance-requests, qa). Semantic vectors in **Amazon S3 Vectors** (one index per entity type inside a single vector bucket).
+- **Data:** DynamoDB (six entity tables + relationships, audit-log, review-queue, analytics-snapshot, overlap-results, guidance-requests). Semantic vectors in **Amazon S3 Vectors** (one index per entity type inside a single vector bucket).
 - **AI:** Amazon Bedrock — `cohere.embed-multilingual-v3` (1024-dim embeddings) and `global.anthropic.claude-haiku-4-5-...` (classification / re-rank).
 - **Edge:** CloudFront serves the SPA over TLS; the SPA calls API Gateway directly (CORS enabled). `app_url` is the CloudFront domain.
 
@@ -124,7 +123,7 @@ needing to self-sign-up and be assigned groups manually.
 
 ```bash
 npm install     # jest (dev only)
-npm test        # 11 suites / 46 tests
+npm test        # 10 suites / 35 tests
 ```
 
 Handlers reach AWS only through the `src/lib/*` wrappers, so unit tests mock the
@@ -133,7 +132,7 @@ the acceptance criteria: CRUD persistence + relationship edges + the
 `initiative-registered` event, submission approve/reject transitions, webhook
 signature validation, search response shape, overlap classification
 (Strong/Partial/Novel), SME match count (1–3), the dashboard snapshot shape,
-and the Q&A authorization rules (asker/expert-only reads, expert-only answers).
+and the SME guidance request/respond authorization rules.
 
 `sam validate --lint` and `sam build` both pass.
 
@@ -161,14 +160,9 @@ choices:
   Cognito JWT. `app_url` is the CloudFront domain.
 - **SME directory.** No LDAP/AD federation in this MVP — SME profiles live in
   DynamoDB/Cognito (as already flagged in the architecture doc).
-- **Q&A "expert" role.** Reuses the existing Cognito `SME` group rather than
-  introducing a new role/claim — any SME-group member can see every question
-  and answer it. Q&A gets its own table (`qa`) and handler (`fn-qa`) instead
-  of the generic per-entity CRUD path, since its authorization shape
-  (asker-or-expert read, expert-only write) doesn't fit the six-entity CRUD
-  model. `creatorUsername` is denormalized onto every record at write time
-  (also backfilled for the six generic entity types in `fn-crud`) so the UI
-  can show "asked by" / "answered by" without a second lookup per record.
+- **Denormalized `creatorUsername`.** Written onto every record at creation time
+  (and backfilled for the six generic entity types in `fn-crud`) so the UI can
+  attribute a record to a person without a second lookup per row.
 
 ## Security notes
 
