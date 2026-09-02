@@ -511,6 +511,26 @@ Resources:
             - { AttributeName: createdAt, KeyType: RANGE }
           Projection: { ProjectionType: ALL }
 
+  QaTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}qa'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: creatorId, AttributeType: S }
+        - { AttributeName: createdAt, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: CreatorIndex
+          KeySchema:
+            - { AttributeName: creatorId, KeyType: HASH }
+            - { AttributeName: createdAt, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
   # ---------------------------------------------------------------------------
   # SQS queues (+ DLQs)
   # ---------------------------------------------------------------------------
@@ -694,6 +714,11 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '${ResourcePrefix}lg-dashboard'
+      RetentionInDays: !Ref LogRetentionDays
+  QaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '${ResourcePrefix}lg-qa'
       RetentionInDays: !Ref LogRetentionDays
 
   # ---------------------------------------------------------------------------
@@ -998,6 +1023,34 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors'
                   - !Sub 'arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ResourcePrefix}vectors/*'
+
+  QaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}role-fn-qa'
+      PermissionsBoundary: !Ref PermissionsBoundaryArn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: qa-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:Query, dynamodb:Scan]
+                Resource:
+                  - !GetAtt QaTable.Arn
+                  - !Sub '${QaTable.Arn}/index/*'
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditLogTable.Arn
 
   NotifierRole:
     Type: AWS::IAM::Role
@@ -1304,6 +1357,24 @@ Resources:
         LogGroup: !Sub '${ResourcePrefix}lg-dashboard'
       Events:
         GetPortfolio: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /dashboard/portfolio, Method: get } }
+
+  QaFn:
+    Type: AWS::Serverless::Function
+    DependsOn: QaLogGroup
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}fn-qa'
+      Handler: handlers/qa.handler
+      Role: !GetAtt QaRole.Arn
+      LoggingConfig:
+        LogGroup: !Sub '${ResourcePrefix}lg-qa'
+      Environment:
+        Variables:
+          TABLE_QA: !Ref QaTable
+      Events:
+        CreateQuestion: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /questions, Method: post } }
+        ListQuestions: { Type: Api, Properties: { RestApiId: !Ref Api, Path: /questions, Method: get } }
+        GetQuestion: { Type: Api, Properties: { RestApiId: !Ref Api, Path: '/questions/{id}', Method: get } }
+        CreateAnswer: { Type: Api, Properties: { RestApiId: !Ref Api, Path: '/questions/{id}/answers', Method: post } }
 
   # ---------------------------------------------------------------------------
   # Step Functions: overlap detection workflow

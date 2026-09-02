@@ -73,6 +73,7 @@ async function createEntity(entityType, body, claims) {
   delete fields.pk;
   delete fields.sk;
   fields.creatorId = claims.userId;
+  fields.creatorUsername = claims.username || claims.email || claims.userId;
   if (entityType === 'initiatives' && !fields.leadUserId) {
     fields.leadUserId = claims.userId;
   }
