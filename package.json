@@ -1,8 +1,8 @@
 {
-  "name": "digital-hub-knowledge-portal",
+  "name": "dsta-knowledge-portal",
   "version": "1.0.0",
   "private": true,
-  "description": "Digital Hub Technical Knowledge & Collaboration Platform - serverless AWS backend and SPA",
+  "description": "DSTA Technical Knowledge & Collaboration Platform - serverless AWS backend and SPA",
   "scripts": {
     "test": "jest --runInBand",
     "test:ci": "jest --runInBand --ci"

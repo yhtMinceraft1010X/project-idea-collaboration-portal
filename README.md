@@ -1,9 +1,9 @@
-# Digital Hub — Technical Knowledge & Collaboration Platform
+# DSTA — Technical Knowledge & Collaboration Platform
 
-A serverless AWS application that gives the Digital Hub Programme Centre a single
+A serverless AWS application that gives DSTA a single
 discovery-and-collaboration layer over its fragmented technical knowledge:
 **Problems, Initiatives, Solutions, Findings, Assets and SME Profiles**. It lets
-teams search across everything the programme knows, surfaces overlapping
+teams search across everything the organisation knows, surfaces overlapping
 initiatives automatically, routes questions to the right experts, and gives
 leadership a portfolio view.
 

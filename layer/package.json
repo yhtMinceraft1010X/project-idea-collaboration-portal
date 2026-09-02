@@ -1,5 +1,5 @@
 {
-  "name": "digital-hub-knowledge-portal-deps",
+  "name": "dsta-knowledge-portal-deps",
   "version": "1.0.0",
   "private": true,
   "description": "Shared AWS SDK v3 runtime dependencies packaged as a Lambda layer (SAM builds this into nodejs/node_modules).",

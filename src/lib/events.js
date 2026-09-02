@@ -17,7 +17,7 @@ function client() {
  * @param {object} detail      structured payload
  * @param {string} [source]    event source, defaults to the app namespace
  */
-async function publish(detailType, detail, source = 'digitalhub.portal') {
+async function publish(detailType, detail, source = 'dsta.portal') {
   await client().send(
     new PutEventsCommand({
       Entries: [

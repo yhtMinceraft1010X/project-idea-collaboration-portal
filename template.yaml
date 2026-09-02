@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  Digital Hub Technical Knowledge & Collaboration Platform - serverless backend
+  DSTA Technical Knowledge & Collaboration Platform - serverless backend
   (Cognito, API Gateway, Lambda, DynamoDB, S3 Vectors, Bedrock, Step Functions,
   SQS/SNS/EventBridge) plus a CloudFront-hosted SPA.
 
@@ -1391,7 +1391,7 @@ Resources:
       Name: !Sub '${ResourcePrefix}rule-initiative-registered'
       EventBusName: !Ref EventBus
       EventPattern:
-        source: [digitalhub.portal]
+        source: [dsta.portal]
         detail-type: [initiative-registered]
       State: ENABLED
       Targets:

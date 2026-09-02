@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy.sh - build and deploy the Digital Hub Knowledge & Collaboration Platform.
+# deploy.sh - build and deploy the DSTA Knowledge & Collaboration Platform.
 #
 # Idempotent. Exits non-zero on failure. Writes outputs.json (including app_url)
 # at the repo root on success. Run by the platform's build system.

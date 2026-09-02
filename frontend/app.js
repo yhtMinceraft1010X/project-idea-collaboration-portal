@@ -1,5 +1,5 @@
 /* ============================================================
-   Digital Hub Technical Knowledge & Collaboration Platform
+   DSTA Technical Knowledge & Collaboration Platform
    Single-page app — vanilla JS, no framework, no build step.
 
    Module layout (single IIFE namespace, no globals leaked):
@@ -524,9 +524,9 @@
 
     var sidebar = h("aside", { class: "sidebar", id: "sidebar" },
       h("div", { class: "brand" },
-        h("div", { class: "brand-mark", "aria-hidden": "true" }, "DH"),
+        h("img", { class: "brand-logo", src: "logo.png", alt: "", "aria-hidden": "true" }),
         h("div", {},
-          h("div", { class: "brand-title" }, "Digital Hub"),
+          h("div", { class: "brand-title" }, "DSTA"),
           h("div", { class: "brand-sub" }, "Knowledge & Collaboration")
         )
       ),
@@ -550,7 +550,7 @@
         "aria-label": (state.navOpen ? "Hide" : "Show") + " navigation",
         onclick: toggleNav
       }, (state.navOpen ? "✕" : "☰") + " Menu"),
-      h("strong", { class: "topbar-title" }, "Digital Hub")
+      h("strong", { class: "topbar-title" }, "DSTA")
     );
 
     var main = h("main", { class: "main" },
@@ -629,7 +629,7 @@
   function ConfigNotice() {
     return h("div", { class: "config-notice" },
       h("div", { class: "card" },
-        h("span", { class: "tag" }, "digital-hub"),
+        h("span", { class: "tag" }, "dsta"),
         h("h1", {}, "Configuration not loaded yet"),
         h("p", { class: "lead" },
           "The runtime configuration (config.js) has not been generated. Deploy the stack to produce it, then reload this page."),
@@ -816,11 +816,11 @@
 
     return h("div", { class: "auth-screen" },
       h("div", { class: "auth-aside" },
-        h("div", { class: "brand-mark", "aria-hidden": "true" }, "DH"),
+        h("img", { class: "brand-logo", src: "logo.png", alt: "DSTA" }),
         h("h1", {}, "Find work, avoid duplication, reach the right people."),
-        h("p", {}, "A shared discovery and collaboration layer for the Digital Hub Programme Centre — problems, initiatives, solutions, findings and experts in one place."),
+        h("p", {}, "A shared discovery and collaboration layer for DSTA — problems, initiatives, solutions, findings and experts in one place."),
         h("ul", {},
-          h("li", {}, "Search across everything the programme knows."),
+          h("li", {}, "Search across everything the organisation knows."),
           h("li", {}, "Surface overlapping initiatives before effort is duplicated."),
           h("li", {}, "Route questions to contributors with real experience.")
         )
@@ -876,7 +876,7 @@
 
     view.appendChild(h("header", { class: "hero masthead" },
       h("span", { class: "tag" }, "Discover"),
-      h("h1", {}, "Search the programme's collective knowledge"),
+      h("h1", {}, "Search the organisation's collective knowledge"),
       h("p", {}, "One query across problems, initiatives, solutions, findings, reusable assets and subject-matter experts.")
     ));
     view.appendChild(h("section", {}, h("h2", { class: "visually-hidden" }, "Search"), h("div", { class: "card" }, form)));
@@ -1265,7 +1265,7 @@
   /* ---------------------------------------------------------- */
   function PortfolioView() {
     var view = h("div", { class: "view" });
-    view.appendChild(sectionHeader("Portfolio dashboard", "Active themes, overlap hotspots, reuse rate and capability gaps across the programme."));
+    view.appendChild(sectionHeader("Portfolio dashboard", "Active themes, overlap hotspots, reuse rate and capability gaps across the organisation."));
 
     var body = h("div", {});
     view.appendChild(h("section", {}, body));
@@ -1467,7 +1467,7 @@
   /* ---------------------------------------------------------- */
   function sectionHeader(title, lead) {
     return h("header", { class: "masthead" },
-      h("span", { class: "tag" }, "Digital Hub"),
+      h("span", { class: "tag" }, "DSTA"),
       h("h1", {}, title),
       lead ? h("p", {}, lead) : null
     );

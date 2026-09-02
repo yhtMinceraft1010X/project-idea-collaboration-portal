@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Central configuration for the Digital Hub Knowledge & Collaboration Platform.
+ * Central configuration for the DSTA Knowledge & Collaboration Platform.
  *
  * Every AWS resource in this application is named with the platform-mandated
  * prefix (see CLAUDE.md). Resource names are derived from this prefix so that

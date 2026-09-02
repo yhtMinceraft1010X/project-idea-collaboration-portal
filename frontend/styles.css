@@ -1,5 +1,5 @@
 /* ============================================================
-   Digital Hub Technical Knowledge & Collaboration Platform
+   DSTA Technical Knowledge & Collaboration Platform
    Styles follow the CAPE DLS Light design language.
 
    The :root token block below is lifted verbatim from
@@ -174,14 +174,13 @@ a { color: var(--accent-strong); }
   overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: var(--space-3); }
-.brand-mark {
+/* Brand logo. The source PNG is a transparent-background mark centred in a
+   3:2 frame, so `cover` on a square box trims the empty side margins and
+   lets the mark itself fill the space. */
+.brand-logo {
   width: 38px; height: 38px; flex: none;
-  border-radius: var(--radius);
-  background: linear-gradient(150deg, var(--accent) 0%, var(--accent-2) 100%);
-  color: var(--accent-ink);
-  display: grid; place-items: center;
-  font-weight: 700; font-size: var(--text-md);
-  box-shadow: var(--shadow);
+  display: block;
+  object-fit: cover;
 }
 .brand-title { font-weight: 700; font-size: var(--text-md); letter-spacing: -0.01em; line-height: 1.2; }
 .brand-sub { font-size: var(--text-xs); color: var(--text-muted); }
@@ -461,7 +460,7 @@ code.inline { background: var(--code-inline-bg); color: var(--code-inline-text);
   display: flex; flex-direction: column; justify-content: center; gap: var(--space-4);
   border-right: 1px solid var(--border);
 }
-.auth-aside .brand-mark { width: 48px; height: 48px; font-size: var(--text-lg); }
+.auth-aside .brand-logo { width: 56px; height: 56px; }
 .auth-aside h1 { font-size: var(--text-2xl); letter-spacing: -0.028em; line-height: var(--leading-tight); margin: 0; }
 .auth-aside p { color: var(--text-muted); font-size: var(--text-md); max-width: 46ch; margin: 0; }
 .auth-aside ul { margin: 0; padding-left: var(--space-4); color: var(--text-muted); max-width: 46ch; }
